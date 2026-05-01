@@ -417,27 +417,42 @@ async function sendTelegramMessage(token, chatId, text) {
 
 async function handleStart(token, chatId) {
   const text = [
-    "Hola, Mica. Ya estoy listo para registrar gastos.",
+    "🤖 BOT DE GASTOS - AYUDA",
     "",
-    "Ejemplos para sumar:",
+    "1) Cargar gastos:",
     "rappi 10000",
     "pedidos ya 3.450,12",
     "meli taza 230",
-    "mercado libre gastos lavarropas 34500,75",
+    "mercado libre lavarropas 34500,75",
     "",
-    "Ejemplos para buscar:",
+    "2) Buscar gastos:",
     "rappi mayo",
     "tazas mayo",
     "resumen mayo",
     "",
-    "Configurar cierre:",
+    "3) Configurar cierre de tarjeta:",
     "cierre mayo 26",
     "",
-    "Corregir categoría:",
+    "4) Corregir categorías o tipos:",
     "cambiar pedidoia yi a pedidos ya",
+    "cambiar prueba a rappi",
     "",
-    "Borrar último gasto:",
+    "5) Ver últimos gastos:",
+    "ultimos",
+    "últimos",
+    "todo",
+    "",
+    "6) Borrar último gasto:",
     "borrar ultimo",
+    "",
+    "7) Borrar un gasto específico:",
+    "borrar prueba 10",
+    "borrar rappi 10000",
+    "borrar meli taza 230",
+    "",
+    "8) Ayuda:",
+    "/help",
+    "ayuda",
   ].join("\n");
 
   await sendTelegramMessage(token, chatId, text);
@@ -939,16 +954,202 @@ async function handleDeleteLast(token, chatId) {
   );
 }
 
+async function handleListExpenses(token, chatId) {
+  const snap = await db
+    .collection("telegram_expenses")
+    .where("chatId", "==", String(chatId))
+    .get();
+
+  const rows = [];
+
+  snap.forEach((doc) => {
+    rows.push({
+      id: doc.id,
+      ref: doc.ref,
+      ...doc.data(),
+    });
+  });
+
+  rows.sort((a, b) => {
+    const dateA = a.expenseDate?.toMillis?.() || 0;
+    const dateB = b.expenseDate?.toMillis?.() || 0;
+    return dateB - dateA;
+  });
+
+  if (rows.length === 0) {
+    await sendTelegramMessage(token, chatId, "No tenés gastos cargados.");
+    return;
+  }
+
+  const lines = ["📋 Últimos gastos:", ""];
+
+  rows.slice(0, 20).forEach((row, index) => {
+    const subtypePart =
+      row.subtypeKey && row.subtypeKey !== "general"
+        ? ` / ${titleCase(row.subtype)}`
+        : "";
+
+    lines.push(
+      `${index + 1}. ${row.expenseDateIso} — ${titleCase(row.place)}${subtypePart}: ${formatMoneyFromCents(row.amountCents)}`
+    );
+  });
+
+  lines.push("");
+  lines.push("Para borrar uno:");
+  lines.push("borrar rappi 10000");
+  lines.push("borrar meli taza 230");
+
+  await sendTelegramMessage(token, chatId, lines.join("\n"));
+}
+
+function parseDeleteSpecificMessage(text) {
+  const normalized = normalizeText(text);
+
+  if (!normalized.startsWith("borrar ")) {
+    return null;
+  }
+
+  const withoutCommand = text.replace(/^borrar\s+/i, "").trim();
+
+  if (
+    normalizeText(withoutCommand) === "ultimo" ||
+    normalizeText(withoutCommand) === "último"
+  ) {
+    return null;
+  }
+
+  const amountInfo = parseAmountAtEnd(withoutCommand);
+
+  if (!amountInfo) {
+    return null;
+  }
+
+  return {
+    originalQuery: withoutCommand,
+    queryText: amountInfo.textWithoutAmount,
+    amountCents: amountInfo.cents,
+  };
+}
+
+async function handleDeleteSpecific(token, chatId, messageText) {
+  const parsedDelete = parseDeleteSpecificMessage(messageText);
+
+  if (!parsedDelete) {
+    await sendTelegramMessage(
+      token,
+      chatId,
+      [
+        "No entendí qué querés borrar.",
+        "",
+        "Usá algo así:",
+        "borrar prueba 10",
+        "borrar rappi 10000",
+        "borrar meli taza 230",
+      ].join("\n")
+    );
+    return;
+  }
+
+  const parsed = await detectPlaceAndSubtype(chatId, parsedDelete.queryText);
+
+  const snap = await db
+    .collection("telegram_expenses")
+    .where("chatId", "==", String(chatId))
+    .where("amountCents", "==", parsedDelete.amountCents)
+    .get();
+
+  const matches = [];
+
+  snap.forEach((doc) => {
+    const data = doc.data();
+
+    const samePlace = data.placeKey === parsed.placeKey;
+    const sameSubtype =
+      parsed.subtypeKey === "general" ||
+      data.subtypeKey === parsed.subtypeKey;
+
+    const originalIncludesQuery = normalizeText(data.originalText || "").includes(
+      normalizeText(parsedDelete.queryText)
+    );
+
+    if ((samePlace && sameSubtype) || originalIncludesQuery) {
+      matches.push({
+        id: doc.id,
+        ref: doc.ref,
+        ...data,
+      });
+    }
+  });
+
+  if (matches.length === 0) {
+    await sendTelegramMessage(
+      token,
+      chatId,
+      `No encontré ningún gasto que coincida con: ${parsedDelete.originalQuery}`
+    );
+    return;
+  }
+
+  matches.sort((a, b) => {
+    const dateA = a.expenseDate?.toMillis?.() || 0;
+    const dateB = b.expenseDate?.toMillis?.() || 0;
+    return dateB - dateA;
+  });
+
+  const selected = matches[0];
+
+  await selected.ref.delete();
+
+  await sendTelegramMessage(
+    token,
+    chatId,
+    [
+      "🗑️ Gasto borrado:",
+      `${selected.expenseDateIso} — ${titleCase(selected.place)}${
+        selected.subtypeKey !== "general" ? ` / ${titleCase(selected.subtype)}` : ""
+      }: ${formatMoneyFromCents(selected.amountCents)}`,
+      "",
+      matches.length > 1
+        ? `Había ${matches.length} coincidencias. Borré la más reciente.`
+        : "",
+    ]
+      .filter(Boolean)
+      .join("\n")
+  );
+}
+
 async function processMessage(token, chatId, text) {
   const normalized = normalizeText(text);
 
-  if (!normalized || normalized === "/start" || normalized === "ayuda") {
+  if (
+    !normalized ||
+    normalized === "/start" ||
+    normalized === "/help" ||
+    normalized === "help" ||
+    normalized === "ayuda"
+  ) {
     await handleStart(token, chatId);
+    return;
+  }
+
+  if (
+    normalized === "ultimos" ||
+    normalized === "últimos" ||
+    normalized === "todo" ||
+    normalized === "listar" ||
+    normalized === "ver gastos"
+  ) {
+    await handleListExpenses(token, chatId);
     return;
   }
 
   if (normalized === "borrar ultimo" || normalized === "borrar último") {
     await handleDeleteLast(token, chatId);
+    return;
+  }
+
+  if (normalized.startsWith("borrar ")) {
+    await handleDeleteSpecific(token, chatId, text);
     return;
   }
 
