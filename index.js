@@ -649,6 +649,7 @@ async function handleSearch(token, chatId, messageText) {
   });
 
   const monthLabel = `${MONTH_NAMES[monthInfo.month]} ${monthInfo.year}`;
+  const closingDay = await getClosingDay(chatId, monthInfo.yearMonth);
 
   if (rows.length === 0) {
     await sendTelegramMessage(
@@ -664,6 +665,7 @@ async function handleSearch(token, chatId, messageText) {
 
   const lines = [];
   lines.push(`📌 ${filter.label} — ${monthLabel}`);
+  lines.push(`Cierre de tarjeta: día ${closingDay}`);
   lines.push("");
 
   rows.forEach((row, index) => {
@@ -1002,6 +1004,99 @@ async function handleListExpenses(token, chatId) {
   await sendTelegramMessage(token, chatId, lines.join("\n"));
 }
 
+async function handleAllExpenses(token, chatId, messageText) {
+  const monthInfo = parseMonthYear(messageText);
+  const closingDay = await getClosingDay(chatId, monthInfo.yearMonth);
+
+  const snap = await db
+    .collection("telegram_expenses")
+    .where("chatId", "==", String(chatId))
+    .where("billingMonth", "==", monthInfo.yearMonth)
+    .get();
+
+  const rows = [];
+
+  snap.forEach((doc) => {
+    rows.push({
+      id: doc.id,
+      ref: doc.ref,
+      ...doc.data(),
+    });
+  });
+
+  rows.sort((a, b) => {
+    const dateA = a.expenseDate?.toMillis?.() || 0;
+    const dateB = b.expenseDate?.toMillis?.() || 0;
+    return dateB - dateA;
+  });
+
+  const monthLabel = `${MONTH_NAMES[monthInfo.month]} ${monthInfo.year}`;
+
+  if (rows.length === 0) {
+    await sendTelegramMessage(
+      token,
+      chatId,
+      [
+        `📋 Todo — ${monthLabel}`,
+        "",
+        `Cierre de tarjeta: día ${closingDay}`,
+        "",
+        "No tenés gastos cargados para este resumen.",
+      ].join("\n")
+    );
+    return;
+  }
+
+  let total = 0;
+  const groupByPlace = {};
+
+  rows.forEach((row) => {
+    const amount = Number(row.amountCents || 0);
+    total += amount;
+
+    if (!groupByPlace[row.place]) {
+      groupByPlace[row.place] = 0;
+    }
+
+    groupByPlace[row.place] += amount;
+  });
+
+  const lines = [];
+
+  lines.push(`📋 Todo — ${monthLabel}`);
+  lines.push(`Cierre de tarjeta: día ${closingDay}`);
+  lines.push(`Total del resumen: ${formatMoneyFromCents(total)}`);
+  lines.push("");
+  lines.push("Por lugar:");
+
+  Object.entries(groupByPlace)
+    .sort((a, b) => b[1] - a[1])
+    .forEach(([place, amount]) => {
+      lines.push(`- ${titleCase(place)}: ${formatMoneyFromCents(amount)}`);
+    });
+
+  lines.push("");
+  lines.push("Gastos:");
+
+  rows.slice(0, 50).forEach((row, index) => {
+    const subtypePart =
+      row.subtypeKey && row.subtypeKey !== "general"
+        ? ` / ${titleCase(row.subtype)}`
+        : "";
+
+    lines.push(
+      `${index + 1}. ${row.expenseDateIso} — ${titleCase(row.place)}${subtypePart}: ${formatMoneyFromCents(row.amountCents)}`
+    );
+  });
+
+  if (rows.length > 50) {
+    lines.push("");
+    lines.push(`Mostrando 50 de ${rows.length} gastos.`);
+  }
+
+  await sendTelegramMessage(token, chatId, lines.join("\n"));
+}
+
 function parseDeleteSpecificMessage(text) {
   const normalized = normalizeText(text);
 
@@ -1132,16 +1227,20 @@ async function processMessage(token, chatId, text) {
     return;
   }
 
-  if (
-    normalized === "ultimos" ||
-    normalized === "últimos" ||
-    normalized === "todo" ||
-    normalized === "listar" ||
-    normalized === "ver gastos"
-  ) {
-    await handleListExpenses(token, chatId);
-    return;
-  }
+if (
+  normalized === "ultimos" ||
+  normalized === "últimos" ||
+  normalized === "listar" ||
+  normalized === "ver gastos"
+) {
+  await handleListExpenses(token, chatId);
+  return;
+}
+
+if (normalized === "todo" || normalized.startsWith("todo ")) {
+  await handleAllExpenses(token, chatId, text);
+  return;
+}
 
   if (normalized === "borrar ultimo" || normalized === "borrar último") {
     await handleDeleteLast(token, chatId);
