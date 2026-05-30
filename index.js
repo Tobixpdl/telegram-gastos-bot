@@ -196,6 +196,42 @@ function nextMonthKey(yearMonth) {
   return monthKey(yearRaw, monthRaw + 1);
 }
 
+function parseYearMonthKey(yearMonth) {
+  const [year, month] = String(yearMonth || "").split("-").map(Number);
+
+  if (
+    !Number.isInteger(year) ||
+    !Number.isInteger(month) ||
+    year < 2000 ||
+    month < 1 ||
+    month > 12
+  ) {
+    return null;
+  }
+
+  return {
+    year,
+    month,
+    yearMonth: monthKey(year, month),
+  };
+}
+
+function buildMonthInfo(yearMonth, explicitMonth = true, isManual = false) {
+  const parsed = parseYearMonthKey(yearMonth);
+
+  if (!parsed) return null;
+
+  return {
+    ...parsed,
+    explicitMonth,
+    isManual,
+  };
+}
+
+function monthLabelFromInfo(monthInfo) {
+  return `${MONTH_NAMES[monthInfo.month]} ${monthInfo.year}`;
+}
+
 function parseMonthYear(text) {
   const normalized = normalizeText(text);
   const now = getArgentinaDateParts();
@@ -402,6 +438,84 @@ async function calculateBillingMonth(chatId, date) {
   return nextMonthKey(expenseMonth);
 }
 
+async function getConfiguredActiveMonth(chatId) {
+  const doc = await db.collection("telegram_settings").doc(String(chatId)).get();
+
+  if (!doc.exists) return null;
+
+  const activeMonth = doc.data().activeMonth;
+  const monthInfo = buildMonthInfo(activeMonth, true, true);
+
+  return monthInfo;
+}
+
+async function getDefaultMonthInfo(chatId) {
+  const configuredMonth = await getConfiguredActiveMonth(chatId);
+
+  if (configuredMonth) {
+    return configuredMonth;
+  }
+
+  const billingMonth = await calculateBillingMonth(chatId, new Date());
+  return buildMonthInfo(billingMonth, false, false);
+}
+
+async function parseMonthYearForChat(chatId, text) {
+  const parsed = parseMonthYear(text);
+
+  if (parsed.explicitMonth) {
+    return {
+      ...parsed,
+      isManual: false,
+    };
+  }
+
+  return await getDefaultMonthInfo(chatId);
+}
+
+function parseActiveMonthMessage(text) {
+  const normalized = normalizeText(text);
+
+  const startsLikeActiveMonthCommand =
+    normalized === "mes" ||
+    normalized === "mes actual" ||
+    normalized === "mes activo" ||
+    normalized.startsWith("mes ") ||
+    normalized.startsWith("mes actual ") ||
+    normalized.startsWith("mes activo ") ||
+    normalized.startsWith("setear mes ") ||
+    normalized.startsWith("configurar mes ") ||
+    normalized.startsWith("poner mes ") ||
+    normalized.startsWith("cambiar mes ");
+
+  if (!startsLikeActiveMonthCommand) return null;
+
+  let monthText = normalized
+    .replace(/^(setear|configurar|poner|cambiar)\s+/, "")
+    .replace(/^mes\s+(actual|activo)\s*/, "")
+    .replace(/^mes\s*/, "")
+    .trim();
+
+  if (!monthText) {
+    return {
+      action: "show",
+    };
+  }
+
+  if (!hasMonthName(monthText)) {
+    return {
+      action: "invalid",
+    };
+  }
+
+  const monthInfo = parseMonthYear(monthText);
+
+  return {
+    action: "set",
+    ...monthInfo,
+  };
+}
+
 async function sendTelegramMessage(token, chatId, text) {
   await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: "POST",
@@ -430,27 +544,33 @@ async function handleStart(token, chatId) {
     "tazas mayo",
     "resumen mayo",
     "",
-    "3) Configurar cierre de tarjeta:",
-    "cierre mayo 26",
+    "3) Configurar mes activo:",
+    "mes junio",
+    "mes actual junio 2026",
+    "mes activo",
     "",
-    "4) Corregir categorías o tipos:",
+    "4) Configurar cierre de tarjeta:",
+    "cierre mayo 26",
+    "cierre 26",
+    "",
+    "5) Corregir categorías o tipos:",
     "cambiar pedidoia yi a pedidos ya",
     "cambiar prueba a rappi",
     "",
-    "5) Ver últimos gastos:",
+    "6) Ver últimos gastos:",
     "ultimos",
     "últimos",
     "todo",
     "",
-    "6) Borrar último gasto:",
+    "7) Borrar último gasto:",
     "borrar ultimo",
     "",
-    "7) Borrar un gasto específico:",
+    "8) Borrar un gasto específico:",
     "borrar prueba 10",
     "borrar rappi 10000",
     "borrar meli taza 230",
     "",
-    "8) Ayuda:",
+    "9) Ayuda:",
     "/help",
     "ayuda",
   ].join("\n");
@@ -463,8 +583,13 @@ async function handleAddExpense(token, chatId, messageText, amountInfo) {
 
   const now = new Date();
   const parts = getArgentinaDateParts(now);
-  const expenseMonth = monthKey(parts.year, parts.month);
-  const billingMonth = await calculateBillingMonth(chatId, now);
+  const monthInfo = await getDefaultMonthInfo(chatId);
+  const expenseMonth = monthInfo.isManual
+    ? monthInfo.yearMonth
+    : monthKey(parts.year, parts.month);
+  const billingMonth = monthInfo.isManual
+    ? monthInfo.yearMonth
+    : monthInfo.yearMonth;
 
   const docRef = await db.collection("telegram_expenses").add({
     chatId: String(chatId),
@@ -485,6 +610,7 @@ async function handleAddExpense(token, chatId, messageText, amountInfo) {
     expenseDateIso: `${parts.year}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`,
     expenseMonth,
     billingMonth,
+    manualMonth: monthInfo.isManual,
 
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
   });
@@ -510,8 +636,8 @@ async function handleAddExpense(token, chatId, messageText, amountInfo) {
     }
   });
 
-  const [yearRaw, monthRaw] = billingMonth.split("-").map(Number);
-  const monthLabel = `${MONTH_NAMES[monthRaw]} ${yearRaw}`;
+  const assignedMonthInfo = buildMonthInfo(billingMonth);
+  const monthLabel = monthLabelFromInfo(assignedMonthInfo);
 
   const lines = [];
 
@@ -606,7 +732,7 @@ async function detectSearchFilter(chatId, queryText) {
 }
 
 async function handleSearch(token, chatId, messageText) {
-  const monthInfo = parseMonthYear(messageText);
+  const monthInfo = await parseMonthYearForChat(chatId, messageText);
   const filter = await detectSearchFilter(chatId, messageText);
 
   const snap = await db
@@ -648,7 +774,7 @@ async function handleSearch(token, chatId, messageText) {
     return dateA - dateB;
   });
 
-  const monthLabel = `${MONTH_NAMES[monthInfo.month]} ${monthInfo.year}`;
+  const monthLabel = monthLabelFromInfo(monthInfo);
   const closingDay = await getClosingDay(chatId, monthInfo.yearMonth);
 
   if (rows.length === 0) {
@@ -703,8 +829,77 @@ async function handleSearch(token, chatId, messageText) {
   await sendTelegramMessage(token, chatId, lines.join("\n"));
 }
 
+async function handleActiveMonth(token, chatId, messageText) {
+  const parsed = parseActiveMonthMessage(messageText);
+
+  if (!parsed) return false;
+
+  if (parsed.action === "invalid") {
+    await sendTelegramMessage(
+      token,
+      chatId,
+      [
+        "No encontré el mes que querés dejar activo.",
+        "Usá algo así:",
+        "mes junio",
+        "mes actual junio 2026",
+      ].join("\n")
+    );
+    return true;
+  }
+
+  if (parsed.action === "show") {
+    const monthInfo = await getDefaultMonthInfo(chatId);
+    const closingDay = await getClosingDay(chatId, monthInfo.yearMonth);
+
+    await sendTelegramMessage(
+      token,
+      chatId,
+      [
+        `📌 Mes activo: ${monthLabelFromInfo(monthInfo)}`,
+        `Cierre de tarjeta: día ${closingDay}`,
+        monthInfo.isManual
+          ? "Los gastos nuevos se guardan en este mes porque lo configuraste manualmente."
+          : "No hay un mes manual configurado; estoy usando el mes calculado automáticamente.",
+        "",
+        "Para cambiarlo: mes junio",
+      ].join("\n")
+    );
+    return true;
+  }
+
+  await db
+    .collection("telegram_settings")
+    .doc(String(chatId))
+    .set(
+      {
+        activeMonth: parsed.yearMonth,
+        activeMonthUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+
+  const monthInfo = buildMonthInfo(parsed.yearMonth, true, true);
+  const closingDay = await getClosingDay(chatId, parsed.yearMonth);
+
+  await sendTelegramMessage(
+    token,
+    chatId,
+    [
+      "✅ Mes activo configurado.",
+      `Mes: ${monthLabelFromInfo(monthInfo)}`,
+      `Cierre de tarjeta: día ${closingDay}`,
+      "",
+      `A partir de ahora, los gastos nuevos se guardan en ${monthLabelFromInfo(monthInfo)}.`,
+      "Para cambiar el cierre: cierre 26",
+    ].join("\n")
+  );
+
+  return true;
+}
+
 async function handleClosingDay(token, chatId, messageText) {
-  const monthInfo = parseMonthYear(messageText);
+  const monthInfo = await parseMonthYearForChat(chatId, messageText);
   const normalized = normalizeText(messageText);
 
   const numbers = normalized.match(/\b\d{1,4}\b/g) || [];
@@ -754,8 +949,9 @@ async function handleClosingDay(token, chatId, messageText) {
 
     const parts = getArgentinaDateParts(expenseDate);
     const expenseMonth = monthKey(parts.year, parts.month);
-    const newBillingMonth =
-      parts.day <= day ? expenseMonth : nextMonthKey(expenseMonth);
+    const newBillingMonth = data.manualMonth === true
+      ? monthInfo.yearMonth
+      : parts.day <= day ? expenseMonth : nextMonthKey(expenseMonth);
 
     batch.update(doc.ref, {
       billingMonth: newBillingMonth,
@@ -769,7 +965,7 @@ async function handleClosingDay(token, chatId, messageText) {
     await batch.commit();
   }
 
-  const monthLabel = `${MONTH_NAMES[monthInfo.month]} ${monthInfo.year}`;
+  const monthLabel = monthLabelFromInfo(monthInfo);
 
   await sendTelegramMessage(
     token,
@@ -1005,7 +1201,7 @@ async function handleListExpenses(token, chatId) {
 }
 
 async function handleAllExpenses(token, chatId, messageText) {
-  const monthInfo = parseMonthYear(messageText);
+  const monthInfo = await parseMonthYearForChat(chatId, messageText);
   const closingDay = await getClosingDay(chatId, monthInfo.yearMonth);
 
   const snap = await db
@@ -1030,7 +1226,7 @@ async function handleAllExpenses(token, chatId, messageText) {
     return dateB - dateA;
   });
 
-  const monthLabel = `${MONTH_NAMES[monthInfo.month]} ${monthInfo.year}`;
+  const monthLabel = monthLabelFromInfo(monthInfo);
 
   if (rows.length === 0) {
     await sendTelegramMessage(
@@ -1224,6 +1420,10 @@ async function processMessage(token, chatId, text) {
     normalized === "ayuda"
   ) {
     await handleStart(token, chatId);
+    return;
+  }
+
+  if (await handleActiveMonth(token, chatId, text)) {
     return;
   }
 
