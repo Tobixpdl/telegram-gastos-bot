@@ -1,16 +1,28 @@
 const express = require("express");
 const admin = require("firebase-admin");
+const { createApiRouter, requireApiKey, apiCors, errorHandler } = require("./src/api");
 
 const app = express();
 app.use(express.json());
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
+const DESKTOP_API_KEY = process.env.DESKTOP_API_KEY;
+const OWNER_CHAT_ID = process.env.OWNER_CHAT_ID;
+const ALLOWED_ORIGINS = String(process.env.ALLOWED_ORIGINS || "")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
 
-if (!TELEGRAM_TOKEN) {
-  throw new Error("Falta TELEGRAM_TOKEN en variables de entorno");
+for (const name of ["TELEGRAM_TOKEN", "FIREBASE_SERVICE_ACCOUNT", "DESKTOP_API_KEY", "OWNER_CHAT_ID"]) {
+  if (!process.env[name]) throw new Error(`Falta ${name} en variables de entorno`);
 }
 
-const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+let serviceAccount;
+try {
+  serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+} catch {
+  throw new Error("FIREBASE_SERVICE_ACCOUNT debe contener JSON válido");
+}
 
 if (serviceAccount.private_key) {
   serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, "\n");
@@ -402,6 +414,50 @@ async function calculateBillingMonth(chatId, date) {
   return nextMonthKey(expenseMonth);
 }
 
+async function createExpense({ chatId, parsed, amountCents, originalText, expenseDate = new Date(), source }) {
+  const parts = getArgentinaDateParts(expenseDate);
+  const expenseMonth = monthKey(parts.year, parts.month);
+  return db.collection("telegram_expenses").add({
+    chatId: String(chatId), place: parsed.place, placeKey: parsed.placeKey, placeRaw: parsed.placeRaw,
+    subtype: parsed.subtype, subtypeKey: parsed.subtypeKey, amountCents, amount: amountCents / 100,
+    originalText, expenseDate: admin.firestore.Timestamp.fromDate(expenseDate),
+    expenseDateIso: `${parts.year}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`,
+    expenseMonth, billingMonth: await calculateBillingMonth(chatId, expenseDate), source,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
+}
+
+async function setClosingDayAndRecalculate(chatId, yearMonth, day) {
+  await db
+    .collection("telegram_settings")
+    .doc(String(chatId))
+    .collection("closing_days")
+    .doc(yearMonth)
+    .set({ day, yearMonth, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+
+  const snap = await db
+    .collection("telegram_expenses")
+    .where("chatId", "==", String(chatId))
+    .where("expenseMonth", "==", yearMonth)
+    .get();
+
+  const batch = db.batch();
+  let updatedCount = 0;
+  snap.forEach((doc) => {
+    const expenseDate = doc.data().expenseDate?.toDate?.();
+    if (!expenseDate) return;
+    const parts = getArgentinaDateParts(expenseDate);
+    const expenseMonth = monthKey(parts.year, parts.month);
+    batch.update(doc.ref, {
+      billingMonth: parts.day <= day ? expenseMonth : nextMonthKey(expenseMonth),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    updatedCount += 1;
+  });
+  if (updatedCount > 0) await batch.commit();
+  return updatedCount;
+}
+
 async function sendTelegramMessage(token, chatId, text) {
   await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: "POST",
@@ -462,32 +518,9 @@ async function handleAddExpense(token, chatId, messageText, amountInfo) {
   const parsed = await detectPlaceAndSubtype(chatId, amountInfo.textWithoutAmount);
 
   const now = new Date();
-  const parts = getArgentinaDateParts(now);
-  const expenseMonth = monthKey(parts.year, parts.month);
   const billingMonth = await calculateBillingMonth(chatId, now);
 
-  const docRef = await db.collection("telegram_expenses").add({
-    chatId: String(chatId),
-
-    place: parsed.place,
-    placeKey: parsed.placeKey,
-    placeRaw: parsed.placeRaw,
-
-    subtype: parsed.subtype,
-    subtypeKey: parsed.subtypeKey,
-
-    amountCents: amountInfo.cents,
-    amount: amountInfo.amount,
-
-    originalText: messageText,
-
-    expenseDate: admin.firestore.Timestamp.fromDate(now),
-    expenseDateIso: `${parts.year}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`,
-    expenseMonth,
-    billingMonth,
-
-    createdAt: admin.firestore.FieldValue.serverTimestamp(),
-  });
+  const docRef = await createExpense({ chatId, parsed, amountCents: amountInfo.cents, originalText: messageText, expenseDate: now, source: "telegram" });
 
   const samePlaceSnap = await db
     .collection("telegram_expenses")
@@ -723,51 +756,7 @@ async function handleClosingDay(token, chatId, messageText) {
     return;
   }
 
-  await db
-    .collection("telegram_settings")
-    .doc(String(chatId))
-    .collection("closing_days")
-    .doc(monthInfo.yearMonth)
-    .set(
-      {
-        day,
-        yearMonth: monthInfo.yearMonth,
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      },
-      { merge: true }
-    );
-
-  const snap = await db
-    .collection("telegram_expenses")
-    .where("chatId", "==", String(chatId))
-    .where("expenseMonth", "==", monthInfo.yearMonth)
-    .get();
-
-  const batch = db.batch();
-  let updatedCount = 0;
-
-  snap.forEach((doc) => {
-    const data = doc.data();
-    const expenseDate = data.expenseDate?.toDate?.();
-
-    if (!expenseDate) return;
-
-    const parts = getArgentinaDateParts(expenseDate);
-    const expenseMonth = monthKey(parts.year, parts.month);
-    const newBillingMonth =
-      parts.day <= day ? expenseMonth : nextMonthKey(expenseMonth);
-
-    batch.update(doc.ref, {
-      billingMonth: newBillingMonth,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-
-    updatedCount++;
-  });
-
-  if (updatedCount > 0) {
-    await batch.commit();
-  }
+  const updatedCount = await setClosingDayAndRecalculate(chatId, monthInfo.yearMonth, day);
 
   const monthLabel = `${MONTH_NAMES[monthInfo.month]} ${monthInfo.year}`;
 
@@ -1280,6 +1269,29 @@ app.get("/", (req, res) => {
   res.send("Telegram expense bot is running.");
 });
 
+app.get("/health", (req, res) => {
+  res.json({ success: true, data: { status: "ok", service: "telegram-gastos-bot" } });
+});
+
+app.use(
+  "/api",
+  apiCors(ALLOWED_ORIGINS),
+  requireApiKey(DESKTOP_API_KEY),
+  createApiRouter({
+    db,
+    admin,
+    ownerId: String(OWNER_CHAT_ID),
+    detectPlaceAndSubtype,
+    getArgentinaDateParts,
+    monthKey,
+    nextMonthKey,
+    calculateBillingMonth,
+    getClosingDay,
+    setClosingDayAndRecalculate,
+    createExpense,
+  })
+);
+
 app.post("/telegram", async (req, res) => {
   try {
     const update = req.body;
@@ -1305,6 +1317,12 @@ app.post("/telegram", async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 
-app.listen(PORT, () => {
-  console.log(`Bot escuchando en puerto ${PORT}`);
-});
+app.use(errorHandler);
+
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Bot escuchando en puerto ${PORT}`);
+  });
+}
+
+module.exports = app;
