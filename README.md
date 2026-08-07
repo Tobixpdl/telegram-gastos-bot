@@ -60,7 +60,10 @@ Para probar el webhook sin afectar Telegram, usá un servidor local con variable
 
 ## Firestore e índices
 
-No hacen falta índices nuevos para el funcionamiento actual: las listas filtran datos personales en memoria luego de consultar por propietario, evitando índices compuestos obligatorios. Para una cuenta con muchos gastos, un índice compuesto opcional sobre `telegram_expenses(chatId ASC, billingMonth ASC)` puede acelerar el resumen y las búsquedas del bot.
+La API consulta el mes o rango solicitado directamente en Firestore; no descarga el historial completo para filtrarlo en memoria. Creá estos índices compuestos para la pantalla de Gastos:
+
+- `telegram_expenses(chatId ASC, billingMonth ASC)`
+- `telegram_expenses(chatId ASC, expenseMonth ASC)`
 
 ## Render y checklist posterior al deploy
 
