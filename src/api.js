@@ -82,7 +82,7 @@ function createApiRouter({ db, admin, ownerId, detectPlaceAndSubtype, getArgenti
       originalText: row.originalText || null,
       expenseDate: timestampToIso(row.expenseDate), expenseDateIso: row.expenseDateIso || null,
       expenseMonth: row.expenseMonth || null, billingMonth: row.billingMonth || null,
-      categoryId: row.categoryId || null, categoryName: row.categoryName || null, personId: row.personId || "self", personName: row.personName || "Yo",
+      categoryId: row.categoryId || null, categoryName: row.categoryName || null, personId: row.personId || "self", personName: row.personName || "Yo", installmentPlanId: row.installmentPlanId || null, installmentNumber: row.installmentNumber || null, installmentCount: row.installmentCount || null,
       source: row.source || null, createdAt: timestampToIso(row.createdAt), updatedAt: timestampToIso(row.updatedAt),
     };
   }
@@ -185,4 +185,5 @@ function apiCors(allowedOrigins) {
 }
 function errorHandler(error, req, res, next) { const status = error instanceof ApiError ? error.status : 500; if (status === 500) console.error("API error", { method: req.method, path: req.path, message: error.message }); res.status(status).json({ success: false, error: { code: error.code || "INTERNAL_ERROR", message: status === 500 ? "OcurriÃ³ un error interno." : error.message } }); }
 module.exports = { ApiError, createApiRouter, requireApiKey, apiCors, errorHandler };
+
 
