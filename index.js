@@ -1,4 +1,4 @@
-const express = require("express");
+﻿const express = require("express");
 const admin = require("firebase-admin");
 const { createApiRouter, requireApiKey, apiCors, errorHandler } = require("./src/api");
 
@@ -21,7 +21,7 @@ let serviceAccount;
 try {
   serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
 } catch {
-  throw new Error("FIREBASE_SERVICE_ACCOUNT debe contener JSON válido");
+  throw new Error("FIREBASE_SERVICE_ACCOUNT debe contener JSON vÃ¡lido");
 }
 
 if (serviceAccount.private_key) {
@@ -111,9 +111,9 @@ const FILLER_WORDS = new Set([
   "gasto",
   "gastos",
   "gaste",
-  "gasté",
+  "gastÃ©",
   "compre",
-  "compré",
+  "comprÃ©",
   "compra",
   "en",
   "de",
@@ -414,15 +414,28 @@ async function calculateBillingMonth(chatId, date) {
   return nextMonthKey(expenseMonth);
 }
 
-async function createExpense({ chatId, parsed, amountCents, originalText, expenseDate = new Date(), source }) {
+async function resolveExpenseCategory(chatId, placeKey, explicitCategoryId) {
+  if (explicitCategoryId === null) return { categoryId: null, categoryName: null };
+  if (explicitCategoryId) {
+    const doc = await db.collection("expense_categories").doc(explicitCategoryId).get();
+    if (doc.exists && String(doc.data().ownerId) === String(chatId)) return { categoryId: doc.id, categoryName: doc.data().name };
+    return { categoryId: null, categoryName: null };
+  }
+  const snap = await db.collection("telegram_expenses").where("chatId", "==", String(chatId)).where("placeKey", "==", placeKey).get();
+  const categories = new Map(); snap.forEach((doc) => { const d=doc.data(); if (d.categoryId && d.categoryName) categories.set(d.categoryId, d.categoryName); });
+  return categories.size === 1 ? { categoryId: [...categories.keys()][0], categoryName: [...categories.values()][0] } : { categoryId: null, categoryName: null };
+}
+
+async function createExpense({ chatId, parsed, amountCents, originalText, expenseDate = new Date(), source, categoryId }) {
   const parts = getArgentinaDateParts(expenseDate);
   const expenseMonth = monthKey(parts.year, parts.month);
+  const category = await resolveExpenseCategory(chatId, parsed.placeKey, categoryId);
   return db.collection("telegram_expenses").add({
     chatId: String(chatId), place: parsed.place, placeKey: parsed.placeKey, placeRaw: parsed.placeRaw,
     subtype: parsed.subtype, subtypeKey: parsed.subtypeKey, amountCents, amount: amountCents / 100,
     originalText, expenseDate: admin.firestore.Timestamp.fromDate(expenseDate),
     expenseDateIso: `${parts.year}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`,
-    expenseMonth, billingMonth: await calculateBillingMonth(chatId, expenseDate), source,
+    expenseMonth, billingMonth: await calculateBillingMonth(chatId, expenseDate), source, categoryId: category.categoryId, categoryName: category.categoryName,
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
   });
 }
@@ -473,7 +486,7 @@ async function sendTelegramMessage(token, chatId, text) {
 
 async function handleStart(token, chatId) {
   const text = [
-    "🤖 BOT DE GASTOS - AYUDA",
+    "ðŸ¤– BOT DE GASTOS - AYUDA",
     "",
     "1) Cargar gastos:",
     "rappi 10000",
@@ -489,19 +502,19 @@ async function handleStart(token, chatId) {
     "3) Configurar cierre de tarjeta:",
     "cierre mayo 26",
     "",
-    "4) Corregir categorías o tipos:",
+    "4) Corregir categorÃ­as o tipos:",
     "cambiar pedidoia yi a pedidos ya",
     "cambiar prueba a rappi",
     "",
-    "5) Ver últimos gastos:",
+    "5) Ver Ãºltimos gastos:",
     "ultimos",
-    "últimos",
+    "Ãºltimos",
     "todo",
     "",
-    "6) Borrar último gasto:",
+    "6) Borrar Ãºltimo gasto:",
     "borrar ultimo",
     "",
-    "7) Borrar un gasto específico:",
+    "7) Borrar un gasto especÃ­fico:",
     "borrar prueba 10",
     "borrar rappi 10000",
     "borrar meli taza 230",
@@ -548,7 +561,7 @@ async function handleAddExpense(token, chatId, messageText, amountInfo) {
 
   const lines = [];
 
-  lines.push(`✅ Guardado: ${formatMoneyFromCents(amountInfo.cents)}`);
+  lines.push(`âœ… Guardado: ${formatMoneyFromCents(amountInfo.cents)}`);
   lines.push(`Lugar: ${titleCase(parsed.place)}`);
 
   if (parsed.subtypeKey !== "general") {
@@ -565,8 +578,8 @@ async function handleAddExpense(token, chatId, messageText, amountInfo) {
 
   if (!parsed.wasKnownPlace) {
     lines.push("");
-    lines.push(`No reconocí ese lugar como categoría conocida.`);
-    lines.push(`Si está mal, podés corregirlo con:`);
+    lines.push(`No reconocÃ­ ese lugar como categorÃ­a conocida.`);
+    lines.push(`Si estÃ¡ mal, podÃ©s corregirlo con:`);
     lines.push(`cambiar ${amountInfo.textWithoutAmount} a pedidos ya`);
   }
 
@@ -584,7 +597,7 @@ function cleanQueryText(text) {
     .replace(/\bcuanta\b/g, " ")
     .replace(/\bcuanto gaste\b/g, " ")
     .replace(/\bgaste\b/g, " ")
-    .replace(/\bgasté\b/g, " ")
+    .replace(/\bgastÃ©\b/g, " ")
     .replace(/\ben\b/g, " ")
     .replace(/\bde\b/g, " ")
     .replace(/\bdel\b/g, " ");
@@ -688,7 +701,7 @@ async function handleSearch(token, chatId, messageText) {
     await sendTelegramMessage(
       token,
       chatId,
-      `No encontré gastos de ${filter.label} en ${monthLabel}.`
+      `No encontrÃ© gastos de ${filter.label} en ${monthLabel}.`
     );
     return;
   }
@@ -697,8 +710,8 @@ async function handleSearch(token, chatId, messageText) {
   const groupByPlace = {};
 
   const lines = [];
-  lines.push(`📌 ${filter.label} — ${monthLabel}`);
-  lines.push(`Cierre de tarjeta: día ${closingDay}`);
+  lines.push(`ðŸ“Œ ${filter.label} â€” ${monthLabel}`);
+  lines.push(`Cierre de tarjeta: dÃ­a ${closingDay}`);
   lines.push("");
 
   rows.forEach((row, index) => {
@@ -717,7 +730,7 @@ async function handleSearch(token, chatId, messageText) {
         : "";
 
     lines.push(
-      `${index + 1}. ${row.expenseDateIso} — ${titleCase(row.place)}${subtypePart}: ${formatMoneyFromCents(amount)}`
+      `${index + 1}. ${row.expenseDateIso} â€” ${titleCase(row.place)}${subtypePart}: ${formatMoneyFromCents(amount)}`
     );
   });
 
@@ -751,7 +764,7 @@ async function handleClosingDay(token, chatId, messageText) {
     await sendTelegramMessage(
       token,
       chatId,
-      "No encontré el día de cierre. Ejemplo: cierre mayo 26"
+      "No encontrÃ© el dÃ­a de cierre. Ejemplo: cierre mayo 26"
     );
     return;
   }
@@ -764,12 +777,12 @@ async function handleClosingDay(token, chatId, messageText) {
     token,
     chatId,
     [
-      `✅ Cierre configurado.`,
+      `âœ… Cierre configurado.`,
       `Mes: ${monthLabel}`,
-      `Día de cierre: ${day}`,
+      `DÃ­a de cierre: ${day}`,
       "",
-      `Las compras de ${monthLabel} hasta el día ${day} inclusive quedan en ${monthLabel}.`,
-      `Las compras desde el día ${day + 1} pasan al resumen del mes siguiente.`,
+      `Las compras de ${monthLabel} hasta el dÃ­a ${day} inclusive quedan en ${monthLabel}.`,
+      `Las compras desde el dÃ­a ${day + 1} pasan al resumen del mes siguiente.`,
       "",
       `Gastos recalculados: ${updatedCount}`,
     ].join("\n")
@@ -802,7 +815,7 @@ async function handleRename(token, chatId, messageText) {
     await sendTelegramMessage(
       token,
       chatId,
-      "Para corregir usá este formato: cambiar pedidoia yi a pedidos ya"
+      "Para corregir usÃ¡ este formato: cambiar pedidoia yi a pedidos ya"
     );
     return;
   }
@@ -889,13 +902,13 @@ async function handleRename(token, chatId, messageText) {
     token,
     chatId,
     [
-      `✅ Corrección hecha.`,
+      `âœ… CorrecciÃ³n hecha.`,
       `Antes: ${parsedRename.oldText}`,
       `Ahora: ${newTextAsPlace ? titleCase(newParsed.place) : titleCase(parsedRename.newText)}`,
       `Gastos actualizados: ${updatedCount}`,
       "",
       newTextAsPlace
-        ? `También guardé "${parsedRename.oldText}" como alias de "${newParsed.place}" para futuras cargas.`
+        ? `TambiÃ©n guardÃ© "${parsedRename.oldText}" como alias de "${newParsed.place}" para futuras cargas.`
         : "",
     ]
       .filter(Boolean)
@@ -939,8 +952,8 @@ async function handleDeleteLast(token, chatId) {
     token,
     chatId,
     [
-      "🗑️ Borré el último gasto:",
-      `${last.expenseDateIso} — ${titleCase(last.place)}: ${formatMoneyFromCents(last.amountCents)}`,
+      "ðŸ—‘ï¸ BorrÃ© el Ãºltimo gasto:",
+      `${last.expenseDateIso} â€” ${titleCase(last.place)}: ${formatMoneyFromCents(last.amountCents)}`,
     ].join("\n")
   );
 }
@@ -968,11 +981,11 @@ async function handleListExpenses(token, chatId) {
   });
 
   if (rows.length === 0) {
-    await sendTelegramMessage(token, chatId, "No tenés gastos cargados.");
+    await sendTelegramMessage(token, chatId, "No tenÃ©s gastos cargados.");
     return;
   }
 
-  const lines = ["📋 Últimos gastos:", ""];
+  const lines = ["ðŸ“‹ Ãšltimos gastos:", ""];
 
   rows.slice(0, 20).forEach((row, index) => {
     const subtypePart =
@@ -981,7 +994,7 @@ async function handleListExpenses(token, chatId) {
         : "";
 
     lines.push(
-      `${index + 1}. ${row.expenseDateIso} — ${titleCase(row.place)}${subtypePart}: ${formatMoneyFromCents(row.amountCents)}`
+      `${index + 1}. ${row.expenseDateIso} â€” ${titleCase(row.place)}${subtypePart}: ${formatMoneyFromCents(row.amountCents)}`
     );
   });
 
@@ -1026,11 +1039,11 @@ async function handleAllExpenses(token, chatId, messageText) {
       token,
       chatId,
       [
-        `📋 Todo — ${monthLabel}`,
+        `ðŸ“‹ Todo â€” ${monthLabel}`,
         "",
-        `Cierre de tarjeta: día ${closingDay}`,
+        `Cierre de tarjeta: dÃ­a ${closingDay}`,
         "",
-        "No tenés gastos cargados para este resumen.",
+        "No tenÃ©s gastos cargados para este resumen.",
       ].join("\n")
     );
     return;
@@ -1052,8 +1065,8 @@ async function handleAllExpenses(token, chatId, messageText) {
 
   const lines = [];
 
-  lines.push(`📋 Todo — ${monthLabel}`);
-  lines.push(`Cierre de tarjeta: día ${closingDay}`);
+  lines.push(`ðŸ“‹ Todo â€” ${monthLabel}`);
+  lines.push(`Cierre de tarjeta: dÃ­a ${closingDay}`);
   lines.push(`Total del resumen: ${formatMoneyFromCents(total)}`);
   lines.push("");
   lines.push("Por lugar:");
@@ -1074,7 +1087,7 @@ async function handleAllExpenses(token, chatId, messageText) {
         : "";
 
     lines.push(
-      `${index + 1}. ${row.expenseDateIso} — ${titleCase(row.place)}${subtypePart}: ${formatMoneyFromCents(row.amountCents)}`
+      `${index + 1}. ${row.expenseDateIso} â€” ${titleCase(row.place)}${subtypePart}: ${formatMoneyFromCents(row.amountCents)}`
     );
   });
 
@@ -1097,7 +1110,7 @@ function parseDeleteSpecificMessage(text) {
 
   if (
     normalizeText(withoutCommand) === "ultimo" ||
-    normalizeText(withoutCommand) === "último"
+    normalizeText(withoutCommand) === "Ãºltimo"
   ) {
     return null;
   }
@@ -1123,9 +1136,9 @@ async function handleDeleteSpecific(token, chatId, messageText) {
       token,
       chatId,
       [
-        "No entendí qué querés borrar.",
+        "No entendÃ­ quÃ© querÃ©s borrar.",
         "",
-        "Usá algo así:",
+        "UsÃ¡ algo asÃ­:",
         "borrar prueba 10",
         "borrar rappi 10000",
         "borrar meli taza 230",
@@ -1169,7 +1182,7 @@ async function handleDeleteSpecific(token, chatId, messageText) {
     await sendTelegramMessage(
       token,
       chatId,
-      `No encontré ningún gasto que coincida con: ${parsedDelete.originalQuery}`
+      `No encontrÃ© ningÃºn gasto que coincida con: ${parsedDelete.originalQuery}`
     );
     return;
   }
@@ -1188,13 +1201,13 @@ async function handleDeleteSpecific(token, chatId, messageText) {
     token,
     chatId,
     [
-      "🗑️ Gasto borrado:",
-      `${selected.expenseDateIso} — ${titleCase(selected.place)}${
+      "ðŸ—‘ï¸ Gasto borrado:",
+      `${selected.expenseDateIso} â€” ${titleCase(selected.place)}${
         selected.subtypeKey !== "general" ? ` / ${titleCase(selected.subtype)}` : ""
       }: ${formatMoneyFromCents(selected.amountCents)}`,
       "",
       matches.length > 1
-        ? `Había ${matches.length} coincidencias. Borré la más reciente.`
+        ? `HabÃ­a ${matches.length} coincidencias. BorrÃ© la mÃ¡s reciente.`
         : "",
     ]
       .filter(Boolean)
@@ -1218,7 +1231,7 @@ async function processMessage(token, chatId, text) {
 
 if (
   normalized === "ultimos" ||
-  normalized === "últimos" ||
+  normalized === "Ãºltimos" ||
   normalized === "listar" ||
   normalized === "ver gastos"
 ) {
@@ -1231,7 +1244,7 @@ if (normalized === "todo" || normalized.startsWith("todo ")) {
   return;
 }
 
-  if (normalized === "borrar ultimo" || normalized === "borrar último") {
+  if (normalized === "borrar ultimo" || normalized === "borrar Ãºltimo") {
     await handleDeleteLast(token, chatId);
     return;
   }
