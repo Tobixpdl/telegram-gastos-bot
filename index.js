@@ -1,5 +1,6 @@
 ﻿const express = require("express");
 const admin = require("firebase-admin");
+const { expensesToCsv } = require("./src/expense-export");
 const { createApiRouter, requireApiKey, apiCors, errorHandler } = require("./src/api");
 
 const app = express();
@@ -472,57 +473,68 @@ async function setClosingDayAndRecalculate(chatId, yearMonth, day) {
 }
 
 async function sendTelegramMessage(token, chatId, text) {
-  await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-    }),
-  });
+  const chunks = [];
+  let current = "";
+  for (const line of String(text).split("\n")) {
+    const candidate = current ? `${current}\n${line}` : line;
+    if (candidate.length <= 3900) {
+      current = candidate;
+    } else {
+      if (current) chunks.push(current);
+      current = line;
+    }
+  }
+  if (current) chunks.push(current);
+
+  for (const chunk of chunks) {
+    const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, text: chunk }),
+    });
+    if (!response.ok) throw new Error(`Telegram sendMessage respondió ${response.status}`);
+  }
+}
+
+async function sendTelegramDocument(token, chatId, filename, contents, caption) {
+  const form = new FormData();
+  form.append("chat_id", String(chatId));
+  form.append("caption", caption);
+  form.append("document", new Blob([contents], { type: "text/csv;charset=utf-8" }), filename);
+  const response = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, { method: "POST", body: form });
+  if (!response.ok) throw new Error(`Telegram sendDocument respondió ${response.status}`);
 }
 
 async function handleStart(token, chatId) {
   const text = [
-    "🤖 BOT DE GASTOS - AYUDA",
+    "🤖 BOT DE GASTOS",
     "",
-    "1) Cargar gastos:",
-    "rappi 10000",
-    "pedidos ya 3.450,12",
-    "meli taza 230",
-    "mercado libre lavarropas 34500,75",
+    "Guardar un gasto:",
+    "café 2500",
+    "supermercado 34.500,75",
     "",
-    "2) Buscar gastos:",
-    "rappi mayo",
-    "tazas mayo",
-    "resumen mayo",
+    "Ver un mes:",
+    "meses",
+    "agosto",
+    "gastos agosto",
+    "gastos agosto 2025",
     "",
-    "3) Configurar cierre de tarjeta:",
-    "cierre mayo 26",
+    "Ver el total:",
+    "total",
+    "total agosto",
+    "total agosto 2025",
     "",
-    "4) Corregir categorías o tipos:",
-    "cambiar pedidoia yi a pedidos ya",
-    "cambiar prueba a rappi",
+    "Exportar para la app:",
+    "exportar agosto",
+    "exportar agosto 2025",
     "",
-    "5) Ver últimos gastos:",
+    "Ver los últimos gastos:",
     "ultimos",
-    "últimos",
-    "todo yo",
-    "todo tobias",
     "",
-    "6) Borrar último gasto:",
+    "Borrar el último:",
     "borrar ultimo",
     "",
-    "7) Borrar un gasto específico:",
-    "borrar prueba 10",
-    "borrar rappi 10000",
-    "borrar meli taza 230",
-    "",
-    "8) Ayuda:",
-    "/help",
-    "ayuda",
+    "Ayuda: /help",
   ].join("\n");
 
   await sendTelegramMessage(token, chatId, text);
@@ -530,63 +542,117 @@ async function handleStart(token, chatId) {
 
 async function handleAddExpense(token, chatId, messageText, amountInfo) {
   const parsed = await detectPlaceAndSubtype(chatId, amountInfo.textWithoutAmount);
-
   const now = new Date();
-  const billingMonth = await calculateBillingMonth(chatId, now);
-
-  const docRef = await createExpense({ chatId, parsed, amountCents: amountInfo.cents, originalText: messageText, expenseDate: now, source: "telegram" });
-
-  const samePlaceSnap = await db
-    .collection("telegram_expenses")
-    .where("chatId", "==", String(chatId))
-    .where("billingMonth", "==", billingMonth)
-    .get();
-
-  let totalPlace = 0;
-  let totalSubtype = 0;
-
-  samePlaceSnap.forEach((doc) => {
-    const data = doc.data();
-
-    if (data.placeKey === parsed.placeKey) {
-      totalPlace += Number(data.amountCents || 0);
-    }
-
-    if (data.subtypeKey === parsed.subtypeKey && parsed.subtypeKey !== "general") {
-      totalSubtype += Number(data.amountCents || 0);
-    }
-  });
-
-  const [yearRaw, monthRaw] = billingMonth.split("-").map(Number);
-  const monthLabel = `${MONTH_NAMES[monthRaw]} ${yearRaw}`;
-
-  const lines = [];
-
-  lines.push(`✅ Guardado: ${formatMoneyFromCents(amountInfo.cents)}`);
-  lines.push(`Lugar: ${titleCase(parsed.place)}`);
-
-  if (parsed.subtypeKey !== "general") {
-    lines.push(`Tipo: ${titleCase(parsed.subtype)}`);
-  }
-
-  lines.push(`Resumen asignado a: ${monthLabel}`);
-  lines.push("");
-  lines.push(`Total en ${titleCase(parsed.place)}: ${formatMoneyFromCents(totalPlace)}`);
-
-  if (parsed.subtypeKey !== "general") {
-    lines.push(`Total en ${titleCase(parsed.subtype)}: ${formatMoneyFromCents(totalSubtype)}`);
-  }
-
-  if (!parsed.wasKnownPlace) {
-    lines.push("");
-    lines.push(`No reconocí ese lugar como categoría conocida.`);
-    lines.push(`Si está mal, podés corregirlo con:`);
-    lines.push(`cambiar ${amountInfo.textWithoutAmount} a pedidos ya`);
-  }
-
-  await sendTelegramMessage(token, chatId, lines.join("\n"));
+  const docRef = await createExpense({ chatId, parsed, amountCents: amountInfo.cents, originalText: messageText, expenseDate: now, source: "telegram", categoryId: null });
+  const parts = getArgentinaDateParts(now);
+  const info = { year: parts.year, month: parts.month, yearMonth: monthKey(parts.year, parts.month) };
+  const rows = (await getCalendarMonthExpenses(chatId, info.yearMonth)).filter(isOwnOrUncategorizedExpense);
+  const totalCents = rows.reduce((sum, row) => sum + Number(row.amountCents || 0), 0);
+  await sendTelegramMessage(token, chatId, [
+    `✅ Guardado: ${amountInfo.textWithoutAmount} — ${formatMoneyFromCents(amountInfo.cents)}`,
+    `Total de ${formatMonthLabel(info)}: ${formatMoneyFromCents(totalCents)}`,
+  ].join("\n"));
 
   return docRef.id;
+}
+
+async function getCalendarMonthExpenses(chatId, yearMonth) {
+  const snap = await db
+    .collection("telegram_expenses")
+    .where("chatId", "==", String(chatId))
+    .get();
+  const rows = snap.docs
+    .map((doc) => ({ id: doc.id, ...doc.data() }))
+    .filter((row) => (row.expenseMonth || String(row.expenseDateIso || "").slice(0, 7)) === yearMonth);
+  rows.sort((a, b) => {
+    const byDate = String(a.expenseDateIso || "").localeCompare(String(b.expenseDateIso || ""));
+    return byDate || String(a.id).localeCompare(String(b.id));
+  });
+  return rows;
+}
+
+function formatMonthLabel(monthInfo) {
+  return `${MONTH_NAMES[monthInfo.month]} ${monthInfo.year}`;
+}
+
+function isOwnOrUncategorizedExpense(row) {
+  return !row.personId || row.personId === "self" || !row.categoryId;
+}
+
+async function handleMonths(token, chatId) {
+  const snap = await db.collection("telegram_expenses").where("chatId", "==", String(chatId)).get();
+  const months = new Map();
+  snap.forEach((doc) => {
+    const row = doc.data();
+    const key = row.expenseMonth || String(row.expenseDateIso || "").slice(0, 7);
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(key)) return;
+    const current = months.get(key) || { count: 0, totalCents: 0 };
+    current.count += 1;
+    current.totalCents += Number(row.amountCents || 0);
+    months.set(key, current);
+  });
+
+  if (!months.size) {
+    await sendTelegramMessage(token, chatId, "Todavía no tenés gastos guardados.");
+    return;
+  }
+
+  const lines = ["📅 Meses disponibles", ""];
+  [...months.entries()].sort((a, b) => b[0].localeCompare(a[0])).forEach(([key, values]) => {
+    const [year, month] = key.split("-").map(Number);
+    lines.push(`${MONTH_NAMES[month]} ${year} — ${values.count} gasto${values.count === 1 ? "" : "s"} — ${formatMoneyFromCents(values.totalCents)}`);
+  });
+  lines.push("", "Para abrir uno, escribí por ejemplo: agosto 2025");
+  await sendTelegramMessage(token, chatId, lines.join("\n"));
+}
+
+async function handleMonthExpenses(token, chatId, messageText) {
+  const info = parseMonthYear(messageText);
+  const rows = await getCalendarMonthExpenses(chatId, info.yearMonth);
+  const label = formatMonthLabel(info);
+  if (!rows.length) {
+    await sendTelegramMessage(token, chatId, `No hay gastos guardados en ${label}.`);
+    return;
+  }
+
+  let totalCents = 0;
+  const lines = [`📅 Gastos de ${label}`, ""];
+  rows.forEach((row, index) => {
+    const amountCents = Number(row.amountCents || 0);
+    totalCents += amountCents;
+    const description = String(row.originalText || row.place || "Gasto")
+      .replace(/\s+\$?\s*\d[\d.\s]*(?:,\d{1,2})?\s*$/, "")
+      .trim();
+    lines.push(`${index + 1}. ${row.expenseDateIso || "Sin fecha"} — ${description}: ${formatMoneyFromCents(amountCents)}`);
+  });
+  lines.push("", `TOTAL: ${formatMoneyFromCents(totalCents)}`);
+  await sendTelegramMessage(token, chatId, lines.join("\n"));
+}
+
+async function handleTotal(token, chatId, messageText) {
+  const info = parseMonthYear(messageText);
+  const rows = (await getCalendarMonthExpenses(chatId, info.yearMonth)).filter(isOwnOrUncategorizedExpense);
+  const totalCents = rows.reduce((sum, row) => sum + Number(row.amountCents || 0), 0);
+  await sendTelegramMessage(token, chatId, [
+    `💰 Total de ${formatMonthLabel(info)}: ${formatMoneyFromCents(totalCents)}`,
+    `${rows.length} gasto${rows.length === 1 ? "" : "s"} propio${rows.length === 1 ? "" : "s"} o sin categoría.`,
+  ].join("\n"));
+}
+
+async function handleExport(token, chatId, messageText) {
+  const info = parseMonthYear(messageText);
+  const rows = await getCalendarMonthExpenses(chatId, info.yearMonth);
+  if (!rows.length) {
+    await sendTelegramMessage(token, chatId, `No hay gastos para exportar de ${formatMonthLabel(info)}.`);
+    return;
+  }
+  await sendTelegramDocument(
+    token,
+    chatId,
+    `gastos-${info.yearMonth}.csv`,
+    expensesToCsv(rows),
+    `Gastos de ${formatMonthLabel(info)} — ${rows.length} registro${rows.length === 1 ? "" : "s"}`
+  );
 }
 
 function cleanQueryText(text) {
@@ -1276,16 +1342,47 @@ async function handleDeleteSpecific(token, chatId, messageText) {
 }
 
 async function processMessage(token, chatId, text) {
-  const normalized = normalizeText(text);
+  const commandText = String(text || "").replace(/^\/([^\s@]+)(?:@\S+)?/, "$1");
+  const normalized = normalizeText(commandText);
 
   if (
     !normalized ||
-    normalized === "/start" ||
-    normalized === "/help" ||
+    normalized === "start" ||
     normalized === "help" ||
     normalized === "ayuda"
   ) {
     await handleStart(token, chatId);
+    return;
+  }
+
+  if (normalized === "total" || normalized.startsWith("total ")) {
+    await handleTotal(token, chatId, text);
+    return;
+  }
+
+  if (normalized === "meses" || normalized === "ver meses") {
+    await handleMonths(token, chatId);
+    return;
+  }
+
+  if (
+    normalized === "exportar" ||
+    normalized.startsWith("exportar ") ||
+    normalized === "export" ||
+    normalized.startsWith("export ")
+  ) {
+    await handleExport(token, chatId, text);
+    return;
+  }
+
+  const opensMonth = hasMonthName(text) && (
+    Object.keys(MONTHS).some((name) => normalized === name || normalized.startsWith(`${name} `)) ||
+    normalized.startsWith("gastos ") ||
+    normalized.startsWith("ver ") ||
+    normalized.startsWith("abrir ")
+  );
+  if (opensMonth) {
+    await handleMonthExpenses(token, chatId, text);
     return;
   }
 
@@ -1379,7 +1476,16 @@ app.post("/telegram", async (req, res) => {
     const chatId = message.chat.id;
     const text = message.text;
 
-    await processMessage(TELEGRAM_TOKEN, chatId, text);
+    try {
+      await processMessage(TELEGRAM_TOKEN, chatId, text);
+    } catch (error) {
+      console.error("telegram message error:", error);
+      await sendTelegramMessage(
+        TELEGRAM_TOKEN,
+        chatId,
+        "No pude completar esa operación. Probá de nuevo en unos segundos."
+      );
+    }
 
     res.sendStatus(200);
   } catch (error) {

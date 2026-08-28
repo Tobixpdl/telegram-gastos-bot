@@ -1,4 +1,23 @@
-# Telegram gastos API
+# Bot de gastos de Telegram
+
+Telegram funciona como una libreta rápida: se envía una descripción seguida del importe y el gasto queda guardado sin categoría. La aplicación de historial puede mantenerse separada e importar los CSV que genera el bot.
+
+## Comandos simples
+
+- `café 2500`: guarda un gasto nuevo del día.
+- `total`: muestra el total del mes actual de gastos propios o sin categoría.
+- `total agosto` o `total agosto 2025`: muestra el total de ese mes calendario.
+- `meses`: muestra los meses disponibles, sus cantidades de gastos y sus totales.
+- `agosto`, `gastos agosto` o `gastos agosto 2025`: abre y lista los gastos del mes.
+- `exportar agosto` o `exportar agosto 2025`: envía un archivo `gastos-YYYY-MM.csv` listo para importar.
+- `ultimos`: muestra los últimos 20 gastos.
+- `borrar ultimo`: elimina el último gasto.
+
+El CSV usa columnas estables: `id`, `date`, `description`, `amount`, `amount_cents`, `currency`, `category` y `source`. La aplicación importadora debería usar `id` para evitar duplicados si se importa dos veces el mismo archivo.
+
+Las consultas simples y la exportación usan el mes calendario (`expenseMonth`), no el mes de cierre de tarjeta (`billingMonth`). No requieren un índice compuesto adicional de Firestore.
+
+# API para la aplicación
 
 Backend Node/Express para el bot existente de Telegram y una futura aplicación de escritorio. Los gastos siguen viviendo en `telegram_expenses`; las configuraciones y cierres siguen en `telegram_settings`. La API agrega las colecciones `tasks` y `reminders`.
 
