@@ -5,17 +5,19 @@ Telegram funciona como una libreta rápida: se envía una descripción seguida d
 ## Comandos simples
 
 - `café 2500`: guarda un gasto nuevo del día.
-- `total`: muestra el total del mes actual de gastos propios o sin categoría.
+- `mes septiembre` o `mes septiembre 2026`: cambia el mes activo; desde el próximo mensaje, los gastos nuevos se guardan allí.
+- `mes`: muestra el mes activo. `mes actual` vuelve al mes calendario en curso.
+- `total`: muestra el total del mes activo de gastos propios o sin categoría.
 - `total agosto` o `total agosto 2025`: muestra el total de ese mes calendario.
 - `meses`: muestra los meses disponibles, sus cantidades de gastos y sus totales.
-- `agosto`, `gastos agosto` o `gastos agosto 2025`: abre y lista los gastos del mes.
+- `agosto`, `gastos agosto`, `gastos mes agosto` o `gastos agosto 2025`: abre y lista los gastos del mes sin cambiar el mes activo.
 - `exportar agosto` o `exportar agosto 2025`: envía un archivo `gastos-YYYY-MM.csv` listo para importar.
 - `ultimos`: muestra los últimos 20 gastos.
 - `borrar ultimo`: elimina el último gasto.
 
 El CSV usa columnas estables: `id`, `date`, `description`, `amount`, `amount_cents`, `currency`, `category` y `source`. La aplicación importadora debería usar `id` para evitar duplicados si se importa dos veces el mismo archivo.
 
-Las consultas simples y la exportación usan el mes calendario (`expenseMonth`), no el mes de cierre de tarjeta (`billingMonth`). No requieren un índice compuesto adicional de Firestore.
+Las consultas simples y la exportación usan el mes asignado (`expenseMonth`), no el mes de cierre de tarjeta (`billingMonth`). Por defecto coincide con el mes calendario, pero el comando `mes ...` permite terminar un mes y empezar a cargar el siguiente antes de que cambie la fecha. No requieren un índice compuesto adicional de Firestore.
 
 # API para la aplicación
 

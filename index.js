@@ -1,6 +1,7 @@
 ﻿const express = require("express");
 const admin = require("firebase-admin");
 const { expensesToCsv } = require("./src/expense-export");
+const { isMonthSelectionCommand, isValidYearMonth } = require("./src/month-selection");
 const { createApiRouter, requireApiKey, apiCors, errorHandler } = require("./src/api");
 
 const app = express();
@@ -415,6 +416,34 @@ async function calculateBillingMonth(chatId, date) {
   return nextMonthKey(expenseMonth);
 }
 
+async function getActiveExpenseMonth(chatId) {
+  const doc = await db.collection("telegram_settings").doc(String(chatId)).get();
+  const configuredMonth = doc.exists ? doc.data().activeExpenseMonth : null;
+
+  if (isValidYearMonth(configuredMonth)) return configuredMonth;
+
+  const now = getArgentinaDateParts();
+  return monthKey(now.year, now.month);
+}
+
+async function setActiveExpenseMonth(chatId, yearMonth) {
+  if (!isValidYearMonth(yearMonth)) throw new Error("Mes activo inválido");
+
+  await db.collection("telegram_settings").doc(String(chatId)).set(
+    {
+      activeExpenseMonth: yearMonth,
+      activeExpenseMonthUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    },
+    { merge: true }
+  );
+}
+
+async function calculateBillingMonthForAssignedMonth(chatId, expenseDate, expenseMonth) {
+  const parts = getArgentinaDateParts(expenseDate);
+  const closingDay = await getClosingDay(chatId, expenseMonth);
+  return parts.day <= closingDay ? expenseMonth : nextMonthKey(expenseMonth);
+}
+
 async function resolveExpenseCategory(chatId, placeKey, explicitCategoryId) {
   if (explicitCategoryId === null) return { categoryId: null, categoryName: null };
   if (explicitCategoryId) {
@@ -427,16 +456,22 @@ async function resolveExpenseCategory(chatId, placeKey, explicitCategoryId) {
   return categories.size === 1 ? { categoryId: [...categories.keys()][0], categoryName: [...categories.values()][0] } : { categoryId: null, categoryName: null };
 }
 
-async function createExpense({ chatId, parsed, amountCents, originalText, expenseDate = new Date(), source, categoryId }) {
+async function createExpense({ chatId, parsed, amountCents, originalText, expenseDate = new Date(), source, categoryId, expenseMonthOverride = null }) {
   const parts = getArgentinaDateParts(expenseDate);
-  const expenseMonth = monthKey(parts.year, parts.month);
+  const calendarMonth = monthKey(parts.year, parts.month);
+  const hasExpenseMonthOverride = isValidYearMonth(expenseMonthOverride);
+  const expenseMonth = hasExpenseMonthOverride ? expenseMonthOverride : calendarMonth;
   const category = await resolveExpenseCategory(chatId, parsed.placeKey, categoryId);
   return db.collection("telegram_expenses").add({
     chatId: String(chatId), place: parsed.place, placeKey: parsed.placeKey, placeRaw: parsed.placeRaw,
     subtype: parsed.subtype, subtypeKey: parsed.subtypeKey, amountCents, amount: amountCents / 100,
     originalText, expenseDate: admin.firestore.Timestamp.fromDate(expenseDate),
     expenseDateIso: `${parts.year}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`,
-    expenseMonth, billingMonth: await calculateBillingMonth(chatId, expenseDate), source, categoryId: category.categoryId, categoryName: category.categoryName,
+    expenseMonth,
+    billingMonth: hasExpenseMonthOverride
+      ? await calculateBillingMonthForAssignedMonth(chatId, expenseDate, expenseMonth)
+      : await calculateBillingMonth(chatId, expenseDate),
+    source, categoryId: category.categoryId, categoryName: category.categoryName,
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
   });
 }
@@ -458,10 +493,13 @@ async function setClosingDayAndRecalculate(chatId, yearMonth, day) {
   const batch = db.batch();
   let updatedCount = 0;
   snap.forEach((doc) => {
-    const expenseDate = doc.data().expenseDate?.toDate?.();
+    const row = doc.data();
+    const expenseDate = row.expenseDate?.toDate?.();
     if (!expenseDate) return;
     const parts = getArgentinaDateParts(expenseDate);
-    const expenseMonth = monthKey(parts.year, parts.month);
+    const expenseMonth = isValidYearMonth(row.expenseMonth)
+      ? row.expenseMonth
+      : monthKey(parts.year, parts.month);
     batch.update(doc.ref, {
       billingMonth: parts.day <= day ? expenseMonth : nextMonthKey(expenseMonth),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -513,6 +551,10 @@ async function handleStart(token, chatId) {
     "café 2500",
     "supermercado 34.500,75",
     "",
+    "Cambiar el mes donde se guardan los próximos gastos:",
+    "mes septiembre",
+    "mes actual",
+    "",
     "Ver un mes:",
     "meses",
     "agosto",
@@ -543,9 +585,10 @@ async function handleStart(token, chatId) {
 async function handleAddExpense(token, chatId, messageText, amountInfo) {
   const parsed = await detectPlaceAndSubtype(chatId, amountInfo.textWithoutAmount);
   const now = new Date();
-  const docRef = await createExpense({ chatId, parsed, amountCents: amountInfo.cents, originalText: messageText, expenseDate: now, source: "telegram", categoryId: null });
-  const parts = getArgentinaDateParts(now);
-  const info = { year: parts.year, month: parts.month, yearMonth: monthKey(parts.year, parts.month) };
+  const activeExpenseMonth = await getActiveExpenseMonth(chatId);
+  const docRef = await createExpense({ chatId, parsed, amountCents: amountInfo.cents, originalText: messageText, expenseDate: now, source: "telegram", categoryId: null, expenseMonthOverride: activeExpenseMonth });
+  const [year, month] = activeExpenseMonth.split("-").map(Number);
+  const info = { year, month, yearMonth: activeExpenseMonth };
   const rows = (await getCalendarMonthExpenses(chatId, info.yearMonth)).filter(isOwnOrUncategorizedExpense);
   const totalCents = rows.reduce((sum, row) => sum + Number(row.amountCents || 0), 0);
   await sendTelegramMessage(token, chatId, [
@@ -554,6 +597,40 @@ async function handleAddExpense(token, chatId, messageText, amountInfo) {
   ].join("\n"));
 
   return docRef.id;
+}
+
+async function handleActiveMonth(token, chatId, messageText) {
+  const normalized = normalizeText(messageText);
+
+  if (normalized === "mes") {
+    const activeExpenseMonth = await getActiveExpenseMonth(chatId);
+    const [year, month] = activeExpenseMonth.split("-").map(Number);
+    await sendTelegramMessage(
+      token,
+      chatId,
+      `📅 El mes activo es ${formatMonthLabel({ year, month })}. Los próximos gastos se guardarán ahí.`
+    );
+    return;
+  }
+
+  let info;
+  if (normalized === "mes actual" || normalized === "mes calendario") {
+    const now = getArgentinaDateParts();
+    info = { year: now.year, month: now.month, yearMonth: monthKey(now.year, now.month) };
+  } else {
+    info = parseMonthYear(messageText);
+    if (!info.explicitMonth) {
+      await sendTelegramMessage(token, chatId, "Indicá un mes. Por ejemplo: mes septiembre");
+      return;
+    }
+  }
+
+  await setActiveExpenseMonth(chatId, info.yearMonth);
+  await sendTelegramMessage(token, chatId, [
+    `✅ Mes activo: ${formatMonthLabel(info)}.`,
+    `Desde tu próximo gasto, todo se guardará en ${MONTH_NAMES[info.month]}.`,
+    `Para consultar otro mes sin cambiarlo: gastos agosto`,
+  ].join("\n"));
 }
 
 async function getCalendarMonthExpenses(chatId, yearMonth) {
@@ -630,7 +707,12 @@ async function handleMonthExpenses(token, chatId, messageText) {
 }
 
 async function handleTotal(token, chatId, messageText) {
-  const info = parseMonthYear(messageText);
+  let info = parseMonthYear(messageText);
+  if (!info.explicitMonth) {
+    const activeExpenseMonth = await getActiveExpenseMonth(chatId);
+    const [year, month] = activeExpenseMonth.split("-").map(Number);
+    info = { year, month, yearMonth: activeExpenseMonth, explicitMonth: false };
+  }
   const rows = (await getCalendarMonthExpenses(chatId, info.yearMonth)).filter(isOwnOrUncategorizedExpense);
   const totalCents = rows.reduce((sum, row) => sum + Number(row.amountCents || 0), 0);
   await sendTelegramMessage(token, chatId, [
@@ -1362,6 +1444,11 @@ async function processMessage(token, chatId, text) {
 
   if (normalized === "meses" || normalized === "ver meses") {
     await handleMonths(token, chatId);
+    return;
+  }
+
+  if (isMonthSelectionCommand(normalized)) {
+    await handleActiveMonth(token, chatId, commandText);
     return;
   }
 
