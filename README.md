@@ -14,6 +14,8 @@ Telegram funciona como una libreta rápida: se envía una descripción seguida d
 - `exportar agosto` o `exportar agosto 2025`: envía un archivo `gastos-YYYY-MM.csv` listo para importar.
 - `ultimos`: muestra los últimos 20 gastos.
 - `borrar ultimo`: elimina el último gasto.
+- `borrar todo septiembre` o `borrar todo septiembre 2025`: elimina los gastos comunes de ese resumen mensual y conserva las cuotas.
+- `borrar todo septiembre incluyendo cuotas`: elimina también las cuotas correspondientes a ese resumen (las cuotas de los meses siguientes no se modifican).
 
 El CSV usa columnas estables: `id`, `date`, `description`, `amount`, `amount_cents`, `currency`, `category` y `source`. La aplicación importadora debería usar `id` para evitar duplicados si se importa dos veces el mismo archivo.
 

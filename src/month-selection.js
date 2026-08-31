@@ -8,4 +8,11 @@ function isValidYearMonth(value) {
   return YEAR_MONTH_RE.test(String(value || ""));
 }
 
-module.exports = { isMonthSelectionCommand, isValidYearMonth };
+function useActiveMonthWhenImplicit(monthInfo, activeYearMonth) {
+  if (monthInfo.explicitMonth || !isValidYearMonth(activeYearMonth)) return monthInfo;
+
+  const [year, month] = activeYearMonth.split("-").map(Number);
+  return { ...monthInfo, year, month, yearMonth: activeYearMonth };
+}
+
+module.exports = { isMonthSelectionCommand, isValidYearMonth, useActiveMonthWhenImplicit };

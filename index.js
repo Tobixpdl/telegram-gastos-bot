@@ -1,7 +1,12 @@
 ﻿const express = require("express");
 const admin = require("firebase-admin");
 const { expensesToCsv } = require("./src/expense-export");
-const { isMonthSelectionCommand, isValidYearMonth } = require("./src/month-selection");
+const {
+  isMonthSelectionCommand,
+  isValidYearMonth,
+  useActiveMonthWhenImplicit,
+} = require("./src/month-selection");
+const { parseDeleteMonthCommand, partitionMonthlyExpenses } = require("./src/delete-month");
 const { createApiRouter, requireApiKey, apiCors, errorHandler } = require("./src/api");
 
 const app = express();
@@ -576,6 +581,9 @@ async function handleStart(token, chatId) {
     "Borrar el último:",
     "borrar ultimo",
     "",
+    "Vaciar los gastos comunes de un resumen (conserva las cuotas):",
+    "borrar todo septiembre",
+    "",
     "Ayuda: /help",
   ].join("\n");
 
@@ -709,9 +717,7 @@ async function handleMonthExpenses(token, chatId, messageText) {
 async function handleTotal(token, chatId, messageText) {
   let info = parseMonthYear(messageText);
   if (!info.explicitMonth) {
-    const activeExpenseMonth = await getActiveExpenseMonth(chatId);
-    const [year, month] = activeExpenseMonth.split("-").map(Number);
-    info = { year, month, yearMonth: activeExpenseMonth, explicitMonth: false };
+    info = useActiveMonthWhenImplicit(info, await getActiveExpenseMonth(chatId));
   }
   const rows = (await getCalendarMonthExpenses(chatId, info.yearMonth)).filter(isOwnOrUncategorizedExpense);
   const totalCents = rows.reduce((sum, row) => sum + Number(row.amountCents || 0), 0);
@@ -1107,6 +1113,64 @@ async function handleDeleteLast(token, chatId) {
   );
 }
 
+async function deleteExpenseDocuments(documents) {
+  const batchSize = 450;
+
+  for (let index = 0; index < documents.length; index += batchSize) {
+    const batch = db.batch();
+    documents.slice(index, index + batchSize).forEach((document) => {
+      batch.delete(document.ref);
+    });
+    await batch.commit();
+  }
+}
+
+async function handleDeleteMonth(token, chatId, messageText) {
+  const now = getArgentinaDateParts();
+  const parsed = parseDeleteMonthCommand(messageText, now.year);
+
+  if (!parsed?.valid) {
+    await sendTelegramMessage(
+      token,
+      chatId,
+      "Indicá el mes que querés vaciar. Por ejemplo: borrar todo septiembre"
+    );
+    return;
+  }
+
+  const snap = await db
+    .collection("telegram_expenses")
+    .where("chatId", "==", String(chatId))
+    .where("billingMonth", "==", parsed.yearMonth)
+    .get();
+
+  const rows = snap.docs.map((doc) => ({ id: doc.id, ref: doc.ref, ...doc.data() }));
+  const { deletable, preservedInstallments } = partitionMonthlyExpenses(
+    rows,
+    parsed.includeInstallments
+  );
+
+  await deleteExpenseDocuments(deletable);
+
+  const label = `${MONTH_NAMES[parsed.month]} ${parsed.year}`;
+  const lines = [
+    `🗑️ ${label}: borré ${deletable.length} gasto${deletable.length === 1 ? "" : "s"}.`,
+  ];
+
+  if (preservedInstallments.length > 0) {
+    lines.push(
+      `Conservé ${preservedInstallments.length} cuota${preservedInstallments.length === 1 ? "" : "s"} del resumen.`
+    );
+    lines.push(
+      `Para borrarlas también: borrar todo ${MONTH_NAMES[parsed.month]} ${parsed.year} incluyendo cuotas`
+    );
+  } else if (parsed.includeInstallments) {
+    lines.push("También se incluyeron las cuotas de ese resumen.");
+  }
+
+  await sendTelegramMessage(token, chatId, lines.join("\n"));
+}
+
 async function handleListExpenses(token, chatId) {
   const snap = await db
     .collection("telegram_expenses")
@@ -1156,7 +1220,10 @@ async function handleListExpenses(token, chatId) {
 }
 
 async function handleAllExpenses(token, chatId, messageText) {
-  const monthInfo = parseMonthYear(messageText);
+  let monthInfo = parseMonthYear(messageText);
+  if (!monthInfo.explicitMonth) {
+    monthInfo = useActiveMonthWhenImplicit(monthInfo, await getActiveExpenseMonth(chatId));
+  }
   const closingDay = await getClosingDay(chatId, monthInfo.yearMonth);
   let requestedPerson = normalizeText(messageText)
     .replace(/^todo\b/, "")
@@ -1490,6 +1557,11 @@ if (normalized === "todo" || normalized.startsWith("todo ")) {
 
   if (normalized === "borrar ultimo" || normalized === "borrar último") {
     await handleDeleteLast(token, chatId);
+    return;
+  }
+
+  if (/^borrar (?:todo|todos)(?:\s|$)/.test(normalized)) {
+    await handleDeleteMonth(token, chatId, text);
     return;
   }
 
